@@ -65,6 +65,7 @@ service_account.json
 *.key
 
 # Local RunVault artifacts, databases, and logs (data plane / runtime)
+.runvault/
 *.db
 *.sqlite
 *.sqlite3
