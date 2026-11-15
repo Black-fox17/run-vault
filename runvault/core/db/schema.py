@@ -7,7 +7,7 @@ from typing import Final
 
 from runvault.core.errors import WorkspaceError
 
-CURRENT_SCHEMA_VERSION: Final[int] = 2
+CURRENT_SCHEMA_VERSION: Final[int] = 4
 
 SCHEMA_V1_STATEMENTS: Final[tuple[str, ...]] = (
     """
@@ -107,6 +107,80 @@ SCHEMA_V2_STATEMENTS: Final[tuple[str, ...]] = (
 )
 
 
+SCHEMA_V3_STATEMENTS: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE IF NOT EXISTS checkpoints (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        artifact_path TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        checksum_sha256 TEXT NOT NULL,
+        step INTEGER,
+        format_version INTEGER NOT NULL,
+        metadata_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON checkpoints(run_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_run_step ON checkpoints(run_id, step);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_run_created ON checkpoints(run_id, created_at);
+    """,
+)
+
+
+SCHEMA_V4_STATEMENTS: Final[tuple[str, ...]] = (
+    """
+    ALTER TABLE checkpoints RENAME TO _checkpoints_v3;
+    """,
+    """
+    CREATE TABLE checkpoints (
+        commit_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT UNIQUE NOT NULL,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        artifact_path TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        checksum_sha256 TEXT NOT NULL,
+        step INTEGER,
+        format_version INTEGER NOT NULL,
+        metadata_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """,
+    """
+    INSERT INTO checkpoints (
+        id, run_id, name, artifact_path, size_bytes, checksum_sha256,
+        step, format_version, metadata_json, created_at
+    )
+    SELECT id, run_id, name, artifact_path, size_bytes, checksum_sha256,
+           step, format_version, metadata_json, created_at
+    FROM _checkpoints_v3
+    ORDER BY created_at ASC, id ASC;
+    """,
+    """
+    DROP TABLE _checkpoints_v3;
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON checkpoints(run_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_run_step ON checkpoints(run_id, step);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_run_created ON checkpoints(run_id, created_at);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_run_commit_seq ON checkpoints(run_id, commit_seq);
+    """,
+)
+
+
 def _apply_v1(cursor: sqlite3.Cursor) -> None:
     for stmt in SCHEMA_V1_STATEMENTS:
         cursor.execute(stmt)
@@ -117,9 +191,21 @@ def _apply_v2(cursor: sqlite3.Cursor) -> None:
         cursor.execute(stmt)
 
 
+def _apply_v3(cursor: sqlite3.Cursor) -> None:
+    for stmt in SCHEMA_V3_STATEMENTS:
+        cursor.execute(stmt)
+
+
+def _apply_v4(cursor: sqlite3.Cursor) -> None:
+    for stmt in SCHEMA_V4_STATEMENTS:
+        cursor.execute(stmt)
+
+
 MIGRATIONS: Final[dict[int, Callable[[sqlite3.Cursor], None]]] = {
     1: _apply_v1,
     2: _apply_v2,
+    3: _apply_v3,
+    4: _apply_v4,
 }
 
 

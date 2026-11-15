@@ -2,27 +2,61 @@
 
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from runvault.core.checkpoints import (
+    CheckpointRecoveryResult,
+    publish_checkpoint,
+)
+from runvault.core.checkpoints import (
+    get_latest_valid_checkpoint as _engine_latest_valid_checkpoint,
+)
+from runvault.core.checkpoints import (
+    restore_checkpoint as _engine_restore_checkpoint,
+)
 from runvault.core.db.repository import SQLiteMetadataRepository
-from runvault.core.domain import Experiment, Metric, Run, utc_now
+from runvault.core.domain import Checkpoint, Experiment, Metric, Run, utc_now
+from runvault.core.errors import (
+    CheckpointCorruptError,
+    CheckpointCreationError,
+    CheckpointError,
+    CheckpointNotFoundError,
+    CheckpointRecoveryError,
+    CorruptCheckpointError,
+    UnsupportedCheckpointFormatError,
+)
 from runvault.core.session import ActiveRun, ExperimentHandle
 from runvault.core.workspace import Workspace, resolve_db_path
 
 __all__ = [
+    "CheckpointCorruptError",
+    "CheckpointCreationError",
+    "CheckpointError",
+    "CheckpointNotFoundError",
+    "CheckpointRecoveryError",
+    "CheckpointRecoveryResult",
+    "CorruptCheckpointError",
+    "UnsupportedCheckpointFormatError",
     "Workspace",
     "create_experiment",
+    "get_checkpoint",
     "get_experiment",
     "get_experiment_by_name",
+    "get_latest_checkpoint",
+    "get_latest_valid_checkpoint",
     "get_metric_history",
     "get_params",
     "get_run",
     "get_tags",
     "init",
+    "list_checkpoints",
     "list_experiments",
     "list_runs",
     "reset_repository_cache",
+    "restore_checkpoint",
+    "save_checkpoint",
 ]
 
 # Process-level repository cache protected by a re-entrant lock
@@ -207,3 +241,90 @@ def get_tags(
     """Retrieve tags associated with an experiment or run."""
     repo = _get_repository(workspace)
     return repo.get_tags(entity_type, entity_id)
+
+
+def save_checkpoint(
+    run_id: str,
+    name: str,
+    writer: Callable[[Path], None],
+    *,
+    step: int | None = None,
+    metadata: dict[str, Any] | None = None,
+    checkpoint_id: str | None = None,
+    workspace: str | Path | None = None,
+) -> Checkpoint:
+    """Atomically create, write, verify, and publish a checkpoint for a run."""
+    repo = _get_repository(workspace)
+    ws = Workspace.from_path(workspace)
+    return publish_checkpoint(
+        workspace=ws,
+        repository=repo,
+        run_id=run_id,
+        name=name,
+        writer=writer,
+        step=step,
+        metadata=metadata,
+        checkpoint_id=checkpoint_id,
+    )
+
+
+def get_checkpoint(
+    checkpoint_id: str,
+    *,
+    workspace: str | Path | None = None,
+) -> Checkpoint | None:
+    """Retrieve checkpoint metadata by ID."""
+    repo = _get_repository(workspace)
+    return repo.get_checkpoint(checkpoint_id)
+
+
+def list_checkpoints(
+    run_id: str,
+    *,
+    workspace: str | Path | None = None,
+) -> list[Checkpoint]:
+    """List all checkpoints recorded for a run in deterministic order."""
+    repo = _get_repository(workspace)
+    return repo.list_checkpoints(run_id)
+
+
+def get_latest_checkpoint(
+    run_id: str,
+    *,
+    workspace: str | Path | None = None,
+) -> Checkpoint | None:
+    """Retrieve the newest committed checkpoint metadata for a run."""
+    repo = _get_repository(workspace)
+    return repo.get_latest_checkpoint(run_id)
+
+
+def get_latest_valid_checkpoint(
+    run_id: str,
+    *,
+    workspace: str | Path | None = None,
+) -> CheckpointRecoveryResult | None:
+    """Find the newest verified checkpoint for a run, falling back if needed."""
+    repo = _get_repository(workspace)
+    ws = Workspace.from_path(workspace)
+    try:
+        return _engine_latest_valid_checkpoint(run_id, ws, repo)
+    except CheckpointNotFoundError:
+        return None
+
+
+def restore_checkpoint(
+    run_id: str,
+    checkpoint_id: str | None = None,
+    *,
+    workspace: str | Path | None = None,
+) -> CheckpointRecoveryResult:
+    """Verify and restore a checkpoint artifact for recovery.
+
+    Returns:
+        CheckpointRecoveryResult containing (checkpoint, path, is_fallback, rejected).
+        Implements os.PathLike[str], unpackable as (ckpt, path, is_fallback), with
+        direct .read_bytes() and .read_text() methods.
+    """
+    repo = _get_repository(workspace)
+    ws = Workspace.from_path(workspace)
+    return _engine_restore_checkpoint(run_id, ws, repo, checkpoint_id)

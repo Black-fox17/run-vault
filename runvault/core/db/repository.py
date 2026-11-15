@@ -1,5 +1,6 @@
 """SQLite implementation of the RunVault metadata repository."""
 
+import dataclasses
 import json
 import sqlite3
 import threading
@@ -11,6 +12,7 @@ from typing import Any
 from runvault.core.db.connection import create_connection, transaction
 from runvault.core.db.schema import CURRENT_SCHEMA_VERSION, initialize_schema
 from runvault.core.domain import (
+    Checkpoint,
     Experiment,
     Metric,
     Run,
@@ -68,6 +70,29 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         error_type=err_type,
         error_traceback=err_tb,
         created_at=_iso_to_datetime(str(row["created_at"])) or utc_now(),
+    )
+
+
+def _row_to_checkpoint(row: sqlite3.Row) -> Checkpoint:
+    metadata_json = str(row["metadata_json"]) if row["metadata_json"] is not None else None
+    row_keys = set(row.keys())
+    commit_seq = (
+        int(row["commit_seq"])
+        if "commit_seq" in row_keys and row["commit_seq"] is not None
+        else None
+    )
+    return Checkpoint(
+        id=str(row["id"]),
+        run_id=str(row["run_id"]),
+        name=str(row["name"]),
+        artifact_path=str(row["artifact_path"]),
+        size_bytes=int(row["size_bytes"]),
+        checksum_sha256=str(row["checksum_sha256"]),
+        step=int(row["step"]) if row["step"] is not None else None,
+        format_version=int(row["format_version"]),
+        metadata=Checkpoint.deserialize_metadata(metadata_json),
+        created_at=_iso_to_datetime(str(row["created_at"])) or utc_now(),
+        commit_seq=commit_seq,
     )
 
 
@@ -505,3 +530,122 @@ class SQLiteMetadataRepository:
             return {str(row["key"]): str(row["value"]) for row in cursor.fetchall()}
         finally:
             cursor.close()
+
+    # -------------------------------------------------------------------------
+    # Checkpoint operations
+    # -------------------------------------------------------------------------
+
+    def create_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
+        """Persist a new checkpoint record in SQLite with full durability."""
+        run = self.get_run(checkpoint.run_id)
+        if run is None:
+            raise RunNotFoundError(checkpoint.run_id)
+        if run.status.is_terminal:
+            raise TerminalRunError(checkpoint.run_id, run.status.value, "create_checkpoint")
+
+        assigned_seq: int | None = None
+        cursor = self.connection.cursor()
+        try:
+            self.connection.execute("PRAGMA synchronous = FULL;")
+            try:
+                self.connection.execute("BEGIN IMMEDIATE;")
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO checkpoints (
+                            id, run_id, name, artifact_path, size_bytes, checksum_sha256,
+                            step, format_version, metadata_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (
+                            checkpoint.id,
+                            checkpoint.run_id,
+                            checkpoint.name,
+                            checkpoint.artifact_path,
+                            checkpoint.size_bytes,
+                            checkpoint.checksum_sha256,
+                            checkpoint.step,
+                            checkpoint.format_version,
+                            checkpoint.serialize_metadata(),
+                            checkpoint.created_at.isoformat(),
+                        ),
+                    )
+                    assigned_seq = cursor.lastrowid
+                    self.connection.execute("COMMIT;")
+                except Exception:
+                    self.connection.execute("ROLLBACK;")
+                    raise
+            finally:
+                self.connection.execute("PRAGMA synchronous = NORMAL;")
+        finally:
+            cursor.close()
+
+        if assigned_seq is not None:
+            return dataclasses.replace(checkpoint, commit_seq=assigned_seq)
+        return checkpoint
+
+    def get_checkpoint(self, checkpoint_id: str) -> Checkpoint | None:
+        """Retrieve a specific checkpoint by ID."""
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, run_id, name, artifact_path, size_bytes, checksum_sha256,
+                       step, format_version, metadata_json, created_at, commit_seq
+                FROM checkpoints
+                WHERE id = ?;
+                """,
+                (checkpoint_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return _row_to_checkpoint(row)
+        finally:
+            cursor.close()
+
+    def list_checkpoints(self, run_id: str) -> list[Checkpoint]:
+        """List all checkpoints belonging to a run in deterministic chronological order."""
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, run_id, name, artifact_path, size_bytes, checksum_sha256,
+                       step, format_version, metadata_json, created_at, commit_seq
+                FROM checkpoints
+                WHERE run_id = ?
+                ORDER BY commit_seq ASC;
+                """,
+                (run_id,),
+            )
+            return [_row_to_checkpoint(row) for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def get_latest_checkpoint(self, run_id: str) -> Checkpoint | None:
+        """Retrieve the newest committed checkpoint according to commit sequence ordering."""
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, run_id, name, artifact_path, size_bytes, checksum_sha256,
+                       step, format_version, metadata_json, created_at, commit_seq
+                FROM checkpoints
+                WHERE run_id = ?
+                ORDER BY commit_seq DESC
+                LIMIT 1;
+                """,
+                (run_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return _row_to_checkpoint(row)
+        finally:
+            cursor.close()
+
+    def delete_checkpoint(self, checkpoint_id: str) -> bool:
+        """Delete a checkpoint record from SQLite."""
+        with transaction(self.connection) as cursor:
+            cursor.execute("DELETE FROM checkpoints WHERE id = ?;", (checkpoint_id,))
+            return cursor.rowcount > 0

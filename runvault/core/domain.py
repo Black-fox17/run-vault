@@ -201,3 +201,80 @@ class Tag:
             raise ValueError("Tag key must be a non-empty string")
         if type(self.value) is not str:
             raise ValueError(f"Tag value must be a string, got {type(self.value).__name__}")
+
+
+CURRENT_CHECKPOINT_FORMAT_VERSION: Final[int] = 1
+SHA256_HEX_LENGTH: Final[int] = 64
+
+
+def _validate_identifier(value: str, field_name: str) -> None:
+    if not value or not value.strip():
+        raise ValueError(f"Checkpoint {field_name} must be a non-empty string")
+    if "/" in value or "\\" in value or ".." in value:
+        raise ValueError(
+            f"Checkpoint {field_name} '{value}' cannot contain path separators or traversal"
+        )
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    """An immutable record of a persisted training checkpoint artifact."""
+
+    id: str
+    run_id: str
+    name: str
+    artifact_path: str
+    size_bytes: int
+    checksum_sha256: str
+    step: int | None = None
+    format_version: int = CURRENT_CHECKPOINT_FORMAT_VERSION
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+    commit_seq: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.id, "id")
+        _validate_identifier(self.run_id, "run_id")
+        if not self.name or not self.name.strip():
+            raise ValueError("Checkpoint name must be a non-empty string")
+        if "/" in self.name or "\\" in self.name or ".." in self.name:
+            raise ValueError(
+                f"Checkpoint name '{self.name}' must be a label, not a filesystem path"
+            )
+        if not self.artifact_path or not self.artifact_path.strip():
+            raise ValueError("Checkpoint artifact_path must be a non-empty string")
+        if ".." in self.artifact_path:
+            raise ValueError(
+                f"Checkpoint artifact_path '{self.artifact_path}' cannot contain traversal"
+            )
+        if self.size_bytes < 0:
+            raise ValueError(f"Checkpoint size_bytes must be >= 0, got {self.size_bytes}")
+        if not self.checksum_sha256 or len(self.checksum_sha256) != SHA256_HEX_LENGTH:
+            raise ValueError("Checkpoint checksum_sha256 must be a 64-character hex string")
+        if self.step is not None and (
+            type(self.step) is bool or type(self.step) is not int or self.step < 0
+        ):
+            raise ValueError(f"Checkpoint step must be a non-negative integer, got {self.step}")
+        if self.commit_seq is not None and (
+            type(self.commit_seq) is bool or type(self.commit_seq) is not int or self.commit_seq < 1
+        ):
+            raise ValueError(
+                f"Checkpoint commit_seq must be a positive integer, got {self.commit_seq}"
+            )
+        if self.format_version < 1:
+            raise ValueError(f"Checkpoint format_version must be >= 1, got {self.format_version}")
+        validate_json_serializable(self.metadata, f"checkpoint-{self.id}-metadata")
+
+    def serialize_metadata(self) -> str:
+        """Serialize checkpoint metadata to JSON string."""
+        return json.dumps(self.metadata, allow_nan=False, sort_keys=True)
+
+    @classmethod
+    def deserialize_metadata(cls, raw_json: str | None) -> dict[str, Any]:
+        """Deserialize checkpoint metadata from JSON string."""
+        if not raw_json:
+            return {}
+        res = json.loads(raw_json)
+        if isinstance(res, dict):
+            return res
+        return {}

@@ -61,7 +61,7 @@ RunVault is designed around four architectural tiers that will be developed acro
 | **Phase 1** | Repository Foundation & Engineering Tooling | **Completed** |
 | **Phase 1.1** | Foundation Verification & Architecture Corrections | **Completed** |
 | **Phase 2** | Core SDK & Local Experiment Tracking | **Completed** |
-| **Phase 3** | Framework Integrations & Checkpoint Engine | Planned |
+| **Phase 3** | Checkpoint Engine & Recovery | **Completed** |
 | **Phase 4** | UI Component Library (`@runvault/ui`) | Planned |
 | **Phase 5** | Standalone Dashboard (`apps/web`) | Planned |
 | **Phase 6** | Platform Control Plane & Hosted API | Planned |
@@ -154,11 +154,59 @@ if experiment:
             print(f"  Step {point.step}: val_loss = {point.value:.4f}")
 ```
 
+### Checkpoint Creation & Fault-Tolerant Recovery
+
+RunVault features an atomic, integrity-verified checkpoint engine with automatic fallback recovery:
+
+```python
+import runvault
+from pathlib import Path
+
+# 1. Start a training run and persist atomic checkpoints
+experiment = runvault.create_experiment("training-experiment")
+with experiment.start_run(name="resnet-run") as run:
+    # A framework-agnostic writer callback persists binary artifacts
+    # (e.g. torch.save(model.state_dict(), dest), pickle, safetensors)
+    def save_weights(dest: Path) -> None:
+        dest.write_bytes(b"... serialized model parameters ...")
+
+    # Save an immutable, atomic checkpoint
+    ckpt = run.save_checkpoint(
+        name="epoch-5",
+        writer=save_weights,
+        step=5,
+        metadata={"val_loss": 0.28, "val_acc": 0.91},
+    )
+    print(f"Persisted checkpoint: {ckpt.name} ({ckpt.checksum_sha256[:8]}...)")
+
+    # 2. Restore the latest valid checkpoint directly
+    # If the latest checkpoint artifact was corrupted or truncated,
+    # RunVault automatically falls back to the newest valid older checkpoint.
+    checkpoint_file = run.restore_checkpoint()
+    if run.last_restored_is_fallback:
+        print(f"Warning: Fell back to older checkpoint {run.last_restored_checkpoint.name}!")
+    else:
+        print(f"Restored latest checkpoint: {checkpoint_file}")
+
+# 3. Retrieve or restore checkpoints outside of an active run context
+restored_ckpt, artifact_path, is_fallback = runvault.restore_checkpoint(run.id)
+print(f"Restored: {restored_ckpt.name} from {artifact_path}")
+```
+
+### Durability Guarantees & Platform Support
+
+- **Atomic No-Overwrite Publication:** Checkpoints are written to unique staging files on the same filesystem and exclusively linked to their final `.bin` destination via `os.link`. Existing checkpoints can never be clobbered or overwritten.
+- **Payload Durability:** The checkpoint engine synchronizes file buffers to non-volatile storage prior to publication, prioritizing `os.fdatasync` where available (Linux/POSIX) and falling back cleanly to `os.fsync` on platforms where `fdatasync` is not exposed (such as Windows Python builds). If neither primitive is available or synchronization fails, checkpoint creation raises `CheckpointCreationError` rather than claiming durability.
+- **Directory Metadata Durability:** On POSIX filesystems, directory entries are synchronized using `os.fsync` on the containing directory file descriptor. Failures trigger immediate published-artifact rollback. On Windows, directory synchronization relies on NTFS metadata journaling.
+- **Fail-Safe Cleanup & Error Integrity:** Failure during any step (writer callback, synchronization, hash calculation, or SQLite commit) guarantees clean rollback without masking primary exceptions. Secondary cleanup failures are attached via standard Python exception notes.
+- **Exception Surface:** Canonical exception classes include `CheckpointCreationError`, `CheckpointNotFoundError`, `CheckpointCorruptError` (with `CorruptCheckpointError` available as a backward-compatible alias), and `CheckpointRecoveryError`.
+
 ### Local Workspace Location
 
-By default, RunVault stores metadata locally in an embedded SQLite database at:
+By default, RunVault stores metadata locally in an embedded SQLite database and checkpoint artifacts in:
 ```text
 <current-working-directory>/.runvault/metadata.db
+<current-working-directory>/.runvault/checkpoints/<run_id>/<checkpoint_id>.bin
 ```
 
 The workspace directory can be customized via:
@@ -173,10 +221,11 @@ The workspace directory can be customized via:
 
 ### Current Scope & Limitations
 
-RunVault Phase 2 establishes the core Python SDK and local metadata engine. The following capabilities are **not yet implemented** and belong to subsequent phases:
-- Checkpoint serialization and recovery (Phase 3).
-- Model artifact storage and Google Drive / S3 cloud storage providers (Phase 3).
-- PyTorch framework hooks and training loop callbacks (Phase 3).
+RunVault Phase 3 establishes the core Python SDK, local metadata engine, and local checkpoint engine. The following capabilities are **not yet implemented** and belong to subsequent phases:
+- UI Component Library (`@runvault/ui`) (Phase 4).
+- Standalone Dashboard (`apps/web`) (Phase 5).
+- Model artifact cloud storage providers (Google Drive, S3, GCS).
+- PyTorch high-level training loop callbacks and hooks.
 - Hosted metadata platform, FastAPI server, and PostgreSQL (Phase 6).
 - Studio and managed JupyterLab environments (Phase 7).
 

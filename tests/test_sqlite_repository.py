@@ -8,7 +8,7 @@ import pytest
 from runvault.core.db.connection import transaction
 from runvault.core.db.repository import SQLiteMetadataRepository
 from runvault.core.db.schema import CURRENT_SCHEMA_VERSION, get_current_schema_version
-from runvault.core.domain import Experiment, Metric, Run, RunStatus
+from runvault.core.domain import Checkpoint, Experiment, Metric, Run, RunStatus
 from runvault.core.errors import (
     ConflictingParameterError,
     ExperimentNotFoundError,
@@ -292,6 +292,26 @@ def test_incremental_schema_migration(tmp_path: Path) -> None:
     finally:
         repo_v2.close()
 
+    # Step 3: Open with target version 3 (triggers migration 3 for checkpoints)
+    repo_v3 = SQLiteMetadataRepository(db_file, target_schema_version=3)
+    try:
+        assert get_current_schema_version(repo_v3.connection) == 3
+        fetched = repo_v3.get_experiment("exp-v1")
+        assert fetched is not None
+        assert fetched.name == "v1-experiment"
+    finally:
+        repo_v3.close()
+
+    # Step 4: Open with target version 4 (triggers migration 4 for commit_seq sequence)
+    repo_v4 = SQLiteMetadataRepository(db_file, target_schema_version=4)
+    try:
+        assert get_current_schema_version(repo_v4.connection) == 4
+        fetched = repo_v4.get_experiment("exp-v1")
+        assert fetched is not None
+        assert fetched.name == "v1-experiment"
+    finally:
+        repo_v4.close()
+
 
 def test_unsupported_future_schema_version_rejected(tmp_path: Path) -> None:
     """Verify that opening a database with a newer schema version fails clearly."""
@@ -414,10 +434,10 @@ def test_original_phase2_database_compatibility(tmp_path: Path) -> None:
     finally:
         raw_conn.close()
 
-    # Open with RunVault SQLiteMetadataRepository: should auto-upgrade to version 2
+    # Open with RunVault SQLiteMetadataRepository: should auto-upgrade to current version
     repo = SQLiteMetadataRepository(db_file)
     try:
-        assert get_current_schema_version(repo.connection) == 2
+        assert get_current_schema_version(repo.connection) == CURRENT_SCHEMA_VERSION
 
         # Verify all seeded records are completely preserved
         exp = repo.get_experiment("exp-leg")
@@ -475,3 +495,261 @@ def test_tag_cannot_reference_nonexistent_entity(tmp_path: Path) -> None:
             repo.set_tags("experiment", "nonexistent-exp", {"k": "v"})
     finally:
         repo.close()
+
+
+def test_checkpoint_synchronous_pragma_sequencing_and_transaction_state(tmp_path: Path) -> None:
+    """Checkpoint metadata commit runs under FULL synchronous mode, restoring NORMAL afterwards."""
+    repo = SQLiteMetadataRepository(tmp_path / "pragma_sync.db")
+    try:
+        exp = Experiment(id="e-sync", name="sync-test")
+        repo.create_experiment(exp)
+        run = Run(id="r-sync", experiment_id="e-sync", status=RunStatus.RUNNING)
+        repo.create_run(run)
+
+        # Baseline synchronous setting is NORMAL (1)
+        cur = repo.connection.cursor()
+        cur.execute("PRAGMA synchronous;")
+        assert cur.fetchone()[0] == 1
+        assert repo.connection.in_transaction is False
+
+        # Operational write (parameters) remains NORMAL (1)
+        repo.log_parameters("r-sync", {"lr": 0.01})
+        cur.execute("PRAGMA synchronous;")
+        assert cur.fetchone()[0] == 1
+        assert repo.connection.in_transaction is False
+
+        # Successful create_checkpoint: sets FULL (2) for commit and restores NORMAL (1)
+        ckpt = Checkpoint(
+            id="c-sync-1",
+            run_id="r-sync",
+            name="ep-1",
+            artifact_path="checkpoints/r-sync/c-sync-1.bin",
+            size_bytes=10,
+            checksum_sha256="a" * 64,
+        )
+        saved = repo.create_checkpoint(ckpt)
+        assert saved.commit_seq is not None
+        assert repo.connection.in_transaction is False
+
+        # Confirmed restored to NORMAL (1)
+        cur.execute("PRAGMA synchronous;")
+        assert cur.fetchone()[0] == 1
+
+        # Failure during create_checkpoint (e.g. duplicate id): rolls back and restores NORMAL
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.create_checkpoint(ckpt)
+
+        assert repo.connection.in_transaction is False
+        cur.execute("PRAGMA synchronous;")
+        assert cur.fetchone()[0] == 1
+    finally:
+        repo.close()
+
+
+def test_migration_v3_to_v4_with_existing_records_and_metadata(tmp_path: Path) -> None:
+    """Migrate schema v3 database with checkpoints, verifying commit_seq and integrity."""
+    db_file = tmp_path / "v3_legacy.db"
+
+    # Initialize a database at schema v3
+    repo_v3 = SQLiteMetadataRepository(db_file, target_schema_version=3)
+    try:
+        assert get_current_schema_version(repo_v3.connection) == 3
+        exp = Experiment(id="e-v3", name="v3-exp")
+        repo_v3.create_experiment(exp)
+        run = Run(id="r-v3", experiment_id="e-v3", status=RunStatus.RUNNING)
+        repo_v3.create_run(run)
+
+        # Insert 2 checkpoints into v3 table (ordered by created_at)
+        sha1 = "1" * 64
+        sha2 = "2" * 64
+        raw_cur = repo_v3.connection.cursor()
+        raw_cur.execute(
+            """
+            INSERT INTO checkpoints (
+                id, run_id, name, artifact_path, size_bytes, checksum_sha256,
+                step, format_version, metadata_json, created_at
+            ) VALUES
+            ('c-v3-1', 'r-v3', 'first', 'checkpoints/r-v3/c-v3-1.bin', 10, ?, 1, 1,
+             '{"acc": 0.8}', '2026-01-01T10:00:00'),
+            ('c-v3-2', 'r-v3', 'second', 'checkpoints/r-v3/c-v3-2.bin', 20, ?, 2, 1,
+             '{"acc": 0.9}', '2026-01-01T11:00:00');
+            """,
+            (sha1, sha2),
+        )
+        repo_v3.connection.commit()
+    finally:
+        repo_v3.close()
+
+    # Reopen at current version (v4)
+    repo_v4 = SQLiteMetadataRepository(db_file)
+    try:
+        assert get_current_schema_version(repo_v4.connection) == 4
+
+        # Verify checkpoints survived with deterministic commit_seq assigned
+        ckpts = repo_v4.list_checkpoints("r-v3")
+        assert len(ckpts) == 2
+
+        assert ckpts[0].id == "c-v3-1"
+        assert ckpts[0].commit_seq == 1
+        assert ckpts[0].metadata == {"acc": 0.8}
+        assert ckpts[0].step == 1
+
+        assert ckpts[1].id == "c-v3-2"
+        assert ckpts[1].commit_seq == 2
+        assert ckpts[1].metadata == {"acc": 0.9}
+        assert ckpts[1].step == 2
+
+        # Verify latest checkpoint query returns c-v3-2
+        latest = repo_v4.get_latest_checkpoint("r-v3")
+        assert latest is not None
+        assert latest.id == "c-v3-2"
+
+        # Insert a new checkpoint in v4: receives commit_seq == 3
+        new_ckpt = Checkpoint(
+            id="c-v4-new",
+            run_id="r-v3",
+            name="third",
+            artifact_path="checkpoints/r-v3/c-v4-new.bin",
+            size_bytes=30,
+            checksum_sha256="3" * 64,
+            step=3,
+        )
+        saved = repo_v4.create_checkpoint(new_ckpt)
+        assert saved.commit_seq == 3
+
+        # Verify cascading deletion of run removes all checkpoints in v4 table
+        repo_v4.delete_run("r-v3")
+        assert repo_v4.list_checkpoints("r-v3") == []
+        assert repo_v4.get_checkpoint("c-v3-1") is None
+        assert repo_v4.get_checkpoint("c-v4-new") is None
+    finally:
+        repo_v4.close()
+
+
+def test_migration_atomic_rollback_on_failure(tmp_path: Path) -> None:
+    """An error during migration rolls back cleanly without leaving partial schema state."""
+    db_file = tmp_path / "rollback_test.db"
+
+    # Start with v1
+    repo_v1 = SQLiteMetadataRepository(db_file, target_schema_version=1)
+    try:
+        assert get_current_schema_version(repo_v1.connection) == 1
+    finally:
+        repo_v1.close()
+
+    # Attempt migration with a simulated failure in schema initialization
+    raw_conn = sqlite3.connect(str(db_file))
+    try:
+        # Pre-create a conflicting table name that would break a migration statement
+        raw_conn.execute("CREATE TABLE _checkpoints_v3 (id INT);")
+        raw_conn.commit()
+    finally:
+        raw_conn.close()
+
+    # Opening repository attempts migration v2 -> v3 -> v4;
+    # v4 fails when renaming checkpoints to _checkpoints_v3 because it already exists
+    with pytest.raises(sqlite3.OperationalError):
+        SQLiteMetadataRepository(db_file)
+
+    # Database connection should be able to verify that user_version did not reach 4
+    check_conn = sqlite3.connect(str(db_file))
+    try:
+        cur = check_conn.cursor()
+        cur.execute("PRAGMA user_version;")
+        ver = cur.fetchone()[0]
+        assert ver < 4
+    finally:
+        check_conn.close()
+
+
+def test_phase2_v1_migration_through_all_versions_with_foreign_keys_and_cascades(
+    tmp_path: Path,
+) -> None:
+    """Migrate a Phase 2 v1 schema database through v2, v3, to v4, verifying integrity."""
+    db_file = tmp_path / "v1_legacy.db"
+
+    # Step 1: Initialize database at schema v1
+    repo_v1 = SQLiteMetadataRepository(db_file, target_schema_version=1)
+    try:
+        assert get_current_schema_version(repo_v1.connection) == 1
+        exp = Experiment(id="e-v1", name="v1-exp")
+        repo_v1.create_experiment(exp)
+        run = Run(id="r-v1", experiment_id="e-v1", status=RunStatus.RUNNING)
+        repo_v1.create_run(run)
+        repo_v1.log_parameters("r-v1", {"learning_rate": 0.001})
+        repo_v1.log_metrics(
+            "r-v1",
+            [Metric(run_id="r-v1", name="loss", value=0.42, step=1)],
+        )
+        repo_v1.set_tags("run", "r-v1", {"stage": "train"})
+    finally:
+        repo_v1.close()
+
+    # Step 2: Open with target version v4 (current schema)
+    repo_v4 = SQLiteMetadataRepository(db_file)
+    try:
+        assert get_current_schema_version(repo_v4.connection) == 4
+
+        # Verify all v1 data survived
+        assert repo_v4.get_experiment("e-v1") is not None
+        assert repo_v4.get_run("r-v1") is not None
+        assert repo_v4.get_parameters("r-v1") == {"learning_rate": 0.001}
+        metrics = repo_v4.get_metric_history("r-v1")
+        assert len(metrics) == 1
+        assert metrics[0].value == 0.42
+        assert repo_v4.get_tags("run", "r-v1") == {"stage": "train"}
+
+        # Verify domain check and foreign-key enforcement on migrated DB:
+        # Repository rejects nonexistent run
+        orphan_ckpt = Checkpoint(
+            id="c-orphan",
+            run_id="nonexistent-run-id",
+            name="orphan-ckpt",
+            artifact_path="checkpoints/nonexistent/c-orphan.bin",
+            size_bytes=100,
+            checksum_sha256="4" * 64,
+        )
+        with pytest.raises(RunNotFoundError):
+            repo_v4.create_checkpoint(orphan_ckpt)
+
+        # Raw SQLite foreign key constraint rejects orphaned checkpoint insertion
+        with (
+            pytest.raises(sqlite3.IntegrityError),
+            transaction(repo_v4.connection) as cursor,
+        ):
+            cursor.execute(
+                """
+                INSERT INTO checkpoints (
+                    id, run_id, name, artifact_path, size_bytes, checksum_sha256,
+                    step, format_version, metadata_json, created_at
+                ) VALUES (
+                    'c-orphan-raw', 'nonexistent-run-id', 'raw', 'p', 10, ?, 1, 1, '{}',
+                    '2026-01-01'
+                );
+                """,
+                ("4" * 64,),
+            )
+
+        # Inserting a valid checkpoint succeeds
+        valid_ckpt = Checkpoint(
+            id="c-valid",
+            run_id="r-v1",
+            name="valid-ckpt",
+            artifact_path="checkpoints/r-v1/c-valid.bin",
+            size_bytes=100,
+            checksum_sha256="5" * 64,
+            step=10,
+        )
+        saved = repo_v4.create_checkpoint(valid_ckpt)
+        assert saved.commit_seq == 1
+        assert repo_v4.list_checkpoints("r-v1") == [saved]
+
+        # Verify cascading deletion after migration: deleting run cascades to everything
+        repo_v4.delete_run("r-v1")
+        assert repo_v4.get_run("r-v1") is None
+        assert repo_v4.get_parameters("r-v1") == {}
+        assert repo_v4.get_metric_history("r-v1") == []
+        assert repo_v4.get_tags("run", "r-v1") == {}
+        assert repo_v4.list_checkpoints("r-v1") == []
+    finally:
+        repo_v4.close()

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import runvault
+from runvault import api
 from runvault.core.domain import RunStatus
 from runvault.core.errors import (
     ConflictingParameterError,
@@ -36,7 +37,23 @@ def test_public_sdk_surface() -> None:
         "Parameter",
         "Tag",
         "Workspace",
+        "Checkpoint",
+        "CURRENT_CHECKPOINT_FORMAT_VERSION",
+        "save_checkpoint",
+        "get_checkpoint",
+        "list_checkpoints",
+        "get_latest_checkpoint",
+        "get_latest_valid_checkpoint",
+        "restore_checkpoint",
         "RunVaultError",
+        "CheckpointError",
+        "CheckpointCreationError",
+        "CheckpointNotFoundError",
+        "CheckpointCorruptError",
+        "CorruptCheckpointError",
+        "UnsupportedCheckpointFormatError",
+        "CheckpointRecoveryError",
+        "CheckpointRecoveryResult",
         "InvalidParameterError",
         "InvalidLifecycleTransitionError",
         "TerminalRunError",
@@ -380,3 +397,24 @@ def test_workspace_discovery_hierarchy(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.chdir(deep_subdir)
     resolved_upward = runvault.Workspace.from_path(None)
     assert resolved_upward.path == vault_dir.resolve()
+
+
+def test_checkpoint_error_hierarchy_and_compatibility_aliases() -> None:
+    """Verify consistent exception exports, inheritance hierarchies, and compatibility aliases."""
+    # Verify CorruptCheckpointError is an exact alias of CheckpointCorruptError
+    assert runvault.CorruptCheckpointError is runvault.CheckpointCorruptError
+    assert issubclass(runvault.CheckpointCorruptError, runvault.CheckpointError)
+    assert issubclass(runvault.CheckpointCreationError, runvault.CheckpointError)
+    assert issubclass(runvault.CheckpointNotFoundError, runvault.CheckpointError)
+    assert issubclass(runvault.CheckpointRecoveryError, runvault.CheckpointError)
+    assert issubclass(runvault.UnsupportedCheckpointFormatError, runvault.CheckpointError)
+    assert issubclass(runvault.CheckpointError, runvault.RunVaultError)
+
+    # Verify exports in runvault.api match
+    assert api.CheckpointCorruptError is runvault.CheckpointCorruptError
+    assert api.CorruptCheckpointError is runvault.CheckpointCorruptError
+    assert api.CheckpointCreationError is runvault.CheckpointCreationError
+    assert api.CheckpointNotFoundError is runvault.CheckpointNotFoundError
+    assert api.CheckpointRecoveryError is runvault.CheckpointRecoveryError
+    assert api.UnsupportedCheckpointFormatError is runvault.UnsupportedCheckpointFormatError
+    assert api.CheckpointError is runvault.CheckpointError

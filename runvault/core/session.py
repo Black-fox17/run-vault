@@ -2,11 +2,20 @@
 
 import traceback
 import uuid
+from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+from runvault.core.checkpoints import (
+    CheckpointRecoveryResult,
+    get_latest_valid_checkpoint,
+    publish_checkpoint,
+    restore_checkpoint,
+)
 from runvault.core.db.repository import SQLiteMetadataRepository
 from runvault.core.domain import (
+    Checkpoint,
     Experiment,
     Metric,
     Run,
@@ -14,9 +23,11 @@ from runvault.core.domain import (
     utc_now,
 )
 from runvault.core.errors import (
+    CheckpointNotFoundError,
     InvalidLifecycleTransitionError,
     TerminalRunError,
 )
+from runvault.core.workspace import Workspace
 
 MAX_ERROR_MSG_LENGTH = 1024
 MAX_TRACEBACK_LENGTH = 4096
@@ -49,6 +60,8 @@ class ActiveRun:
         self._start_time: datetime | None = None
         self._closed = False
         self._entered = False
+        self._last_restored_checkpoint: Checkpoint | None = None
+        self._last_restored_is_fallback: bool = False
 
         # Create record in repository in INITIALIZING state
         now = utc_now()
@@ -313,6 +326,112 @@ class ActiveRun:
     def to_run(self) -> Run | None:
         """Return the immutable Run domain snapshot."""
         return self._repo.get_run(self._run_id)
+
+    @property
+    def workspace(self) -> Workspace:
+        """The resolved Workspace environment for this run."""
+        return Workspace(path=self._repo.db_path.parent)
+
+    # -------------------------------------------------------------------------
+    # Checkpoint Operations
+    # -------------------------------------------------------------------------
+
+    def save_checkpoint(
+        self,
+        name: str,
+        writer: Callable[[Path], None],
+        *,
+        step: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        checkpoint_id: str | None = None,
+    ) -> Checkpoint:
+        """Atomically persist a recoverable training checkpoint.
+
+        Args:
+            name: Human-readable label for the checkpoint (not a filesystem path).
+            writer: Synchronous callback that writes the application artifact to the given path.
+            step: Optional training step/epoch counter.
+            metadata: Optional JSON-compatible dictionary of custom metadata.
+            checkpoint_id: Optional UUID override.
+
+        Returns:
+            The committed and verified Checkpoint domain record.
+
+        Raises:
+            TerminalRunError: If the run is in a terminal state.
+            CheckpointCreationError: If writing, publication, or metadata commit fails.
+        """
+        self._ensure_active("save_checkpoint")
+        return publish_checkpoint(
+            workspace=self.workspace,
+            repository=self._repo,
+            run_id=self._run_id,
+            name=name,
+            writer=writer,
+            step=step,
+            metadata=metadata,
+            checkpoint_id=checkpoint_id,
+        )
+
+    def get_latest_checkpoint(self) -> Checkpoint | None:
+        """Retrieve the newest committed checkpoint metadata for this run."""
+        return self._repo.get_latest_checkpoint(self._run_id)
+
+    def get_latest_valid_checkpoint(self) -> CheckpointRecoveryResult | None:
+        """Find the newest verified checkpoint for this run, falling back if needed."""
+        try:
+            return get_latest_valid_checkpoint(
+                run_id=self._run_id,
+                workspace=self.workspace,
+                repository=self._repo,
+            )
+        except CheckpointNotFoundError:
+            return None
+
+    def list_checkpoints(self) -> list[Checkpoint]:
+        """List all committed checkpoints for this run in deterministic order."""
+        return self._repo.list_checkpoints(self._run_id)
+
+    def restore_checkpoint(self, checkpoint_id: str | None = None) -> CheckpointRecoveryResult:
+        """Verify and restore a checkpoint artifact for recovery.
+
+        If checkpoint_id is None, discovers and verifies the latest valid checkpoint,
+        transparently falling back to older valid checkpoints if the newest is corrupt.
+        If checkpoint_id is specified, strictly restores that exact checkpoint without fallback.
+
+        Args:
+            checkpoint_id: Specific checkpoint ID to restore, or None for latest valid.
+
+        Returns:
+            CheckpointRecoveryResult containing (checkpoint, path, is_fallback, rejected).
+            Implements os.PathLike[str], unpackable as (ckpt, path, is_fallback), with
+            direct .read_bytes() and .read_text() methods.
+
+        Raises:
+            CheckpointNotFoundError: If no checkpoint exists.
+            CheckpointCorruptError: If the specified checkpoint fails verification.
+            UnsupportedCheckpointFormatError: If checkpoint format is unsupported.
+            CheckpointRecoveryError: If checkpoints exist but none pass verification.
+        """
+        result = restore_checkpoint(
+            run_id=self._run_id,
+            workspace=self.workspace,
+            repository=self._repo,
+            checkpoint_id=checkpoint_id,
+        )
+        self._last_restored_checkpoint = result.checkpoint
+        self._last_restored_is_fallback = result.is_fallback
+        return result
+
+    @property
+    def last_restored_checkpoint(self) -> Checkpoint | None:
+        """The Checkpoint record returned by the most recent restore_checkpoint call."""
+        return self._last_restored_checkpoint
+
+    @property
+    def last_restored_is_fallback(self) -> bool:
+        """True if the most recent restore_checkpoint fell back to an older valid checkpoint."""
+        return self._last_restored_is_fallback
 
     def _ensure_active(self, operation: str) -> None:
         current_status = self.status

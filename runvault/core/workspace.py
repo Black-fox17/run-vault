@@ -9,6 +9,7 @@ from runvault.core.errors import WorkspaceError
 
 DEFAULT_WORKSPACE_DIRNAME: Final[str] = ".runvault"
 DEFAULT_DB_FILENAME: Final[str] = "metadata.db"
+DEFAULT_CHECKPOINTS_DIRNAME: Final[str] = "checkpoints"
 ENV_WORKSPACE_DIR: Final[str] = "RUNVAULT_DIR"
 
 
@@ -72,6 +73,17 @@ class Workspace:
     def db_path(self) -> Path:
         """The path to the workspace SQLite database file."""
         return self.path / DEFAULT_DB_FILENAME
+
+    @property
+    def checkpoints_dir(self) -> Path:
+        """The base directory for storing checkpoint artifacts."""
+        return self.path / DEFAULT_CHECKPOINTS_DIRNAME
+
+    def get_run_checkpoints_dir(self, run_id: str) -> Path:
+        """Return the checkpoint directory for a specific run, ensuring it exists."""
+        run_dir = self.checkpoints_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
 
     @classmethod
     def from_path(cls, path: str | Path | None = None) -> "Workspace":

@@ -96,3 +96,87 @@ class WorkspaceError(RunVaultError):
         self.path = path
         self.reason = reason
         self.original_error = original_error
+
+
+class CheckpointError(RunVaultError):
+    """Base exception for all checkpoint-related errors."""
+
+
+class CheckpointCreationError(CheckpointError):
+    """Raised when checkpoint artifact creation, writing, or publication fails."""
+
+    def __init__(
+        self,
+        run_id: str,
+        name: str,
+        reason: str,
+        original_error: Exception | None = None,
+    ) -> None:
+        super().__init__(f"Failed to create checkpoint '{name}' for run '{run_id}': {reason}")
+        self.run_id = run_id
+        self.name = name
+        self.reason = reason
+        self.original_error = original_error
+
+
+class CheckpointNotFoundError(CheckpointError):
+    """Raised when a specified checkpoint or any valid checkpoint cannot be found."""
+
+    def __init__(
+        self,
+        identifier: str,
+        run_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        msg = f"Checkpoint '{identifier}' not found"
+        if run_id:
+            msg += f" for run '{run_id}'"
+        if reason:
+            msg += f": {reason}"
+        super().__init__(msg)
+        self.identifier = identifier
+        self.run_id = run_id
+        self.reason = reason
+
+
+class CheckpointCorruptError(CheckpointError):
+    """Raised when a checkpoint fails integrity verification (size, checksum, missing file)."""
+
+    def __init__(self, checkpoint_id: str, reason: str) -> None:
+        super().__init__(f"Checkpoint '{checkpoint_id}' is corrupt: {reason}")
+        self.checkpoint_id = checkpoint_id
+        self.reason = reason
+
+
+# Alias for naming consistency and backward compatibility
+CorruptCheckpointError = CheckpointCorruptError
+
+
+class UnsupportedCheckpointFormatError(CheckpointError):
+    """Raised when a checkpoint format version is unsupported."""
+
+    def __init__(
+        self,
+        format_version: int,
+        max_supported: int,
+        checkpoint_id: str | None = None,
+    ) -> None:
+        msg = (
+            f"Checkpoint format version {format_version} is unsupported "
+            f"(maximum supported: {max_supported})"
+        )
+        if checkpoint_id:
+            msg = f"Checkpoint '{checkpoint_id}': {msg}"
+        super().__init__(msg)
+        self.checkpoint_id = checkpoint_id
+        self.format_version = format_version
+        self.max_supported = max_supported
+
+
+class CheckpointRecoveryError(CheckpointError):
+    """Raised when recovery from a checkpoint fails."""
+
+    def __init__(self, run_id: str, reason: str) -> None:
+        super().__init__(f"Checkpoint recovery failed for run '{run_id}': {reason}")
+        self.run_id = run_id
+        self.reason = reason
