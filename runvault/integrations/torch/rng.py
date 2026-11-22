@@ -59,16 +59,18 @@ def capture_rng_state() -> RngState:
         try:
             import numpy as np
 
-            # In NumPy, legacy=True explicitly selects the 5-element tuple overload
-            np_state = np.random.get_state(legacy=True)
-            keys_list = [int(x) for x in np_state[1]]
-            state["numpy"] = (
-                str(np_state[0]),
-                keys_list,
-                int(np_state[2]),
-                int(np_state[3]),
-                float(np_state[4]),
-            )
+            # Third-party typing boundary: NumPy type stubs diverge across Python/NumPy versions
+            # (typed as dict[str, Any] in Python 3.11 stubs vs tuple in Python 3.14 stubs).
+            raw_state: Any = np.random.get_state(legacy=True)
+            if isinstance(raw_state, (tuple, list)):
+                keys_list = [int(x) for x in raw_state[1]]
+                state["numpy"] = (
+                    str(raw_state[0]),
+                    keys_list,
+                    int(raw_state[2]),
+                    int(raw_state[3]),
+                    float(raw_state[4]),
+                )
         except Exception as err:
             logger.debug("Failed to capture NumPy RNG state: %s", err)
 
