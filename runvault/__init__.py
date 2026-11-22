@@ -1,6 +1,9 @@
 """RunVault - Lightweight ML experiment management, checkpointing, and execution platform."""
 
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from runvault.integrations.gdrive import GoogleDriveStorageProvider
 
 from runvault.api import (
     CheckpointRecoveryResult,
@@ -76,6 +79,7 @@ __all__ = [
     "Experiment",
     "ExperimentHandle",
     "ExperimentNotFoundError",
+    "GoogleDriveStorageProvider",
     "InvalidLifecycleTransitionError",
     "InvalidMetricError",
     "InvalidParameterError",
@@ -115,3 +119,11 @@ __all__ = [
     "restore_checkpoint",
     "save_checkpoint",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "GoogleDriveStorageProvider":
+        from runvault.integrations.gdrive import GoogleDriveStorageProvider
+
+        return GoogleDriveStorageProvider
+    raise AttributeError(f"module 'runvault' has no attribute '{name}'")

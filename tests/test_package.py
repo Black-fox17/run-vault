@@ -1,5 +1,6 @@
 """Verification tests for the root runvault package distribution and imports."""
 
+import subprocess
 import sys
 from typing import Final
 
@@ -20,7 +21,7 @@ def test_package_all_attribute() -> None:
 
 
 def test_core_package_is_lightweight() -> None:
-    """Verify that importing the core package does not pull heavy optional dependencies."""
+    """Verify that importing core package in isolated process does not pull heavy dependencies."""
     forbidden_heavy_modules: Final[tuple[str, ...]] = (
         "torch",
         "pydantic",
@@ -29,7 +30,19 @@ def test_core_package_is_lightweight() -> None:
         "googleapiclient",
         "google.auth",
     )
-    for module_name in forbidden_heavy_modules:
-        assert module_name not in sys.modules, (
-            f"Core runvault package unexpectedly imported heavy module: {module_name}"
-        )
+    code = (
+        "import sys\n"
+        "import runvault\n"
+        f"forbidden = {forbidden_heavy_modules!r}\n"
+        "for module_name in forbidden:\n"
+        "    if module_name in sys.modules:\n"
+        "        sys.stderr.write(f'Module {module_name} unexpectedly imported\\n')\n"
+        "        sys.exit(1)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

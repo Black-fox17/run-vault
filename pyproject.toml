@@ -82,6 +82,12 @@ ignore = [
 "tests/*" = [
     "PLR2004", # Magic value used in comparison
 ]
+"runvault/__init__.py" = [
+    "PLC0415", # Lazy deferred import for optional subpackages
+]
+"runvault/integrations/*" = [
+    "PLC0415", # Optional dependency isolation inside accessor functions
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["runvault"]

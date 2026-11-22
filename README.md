@@ -62,7 +62,9 @@ RunVault is designed around four architectural tiers that will be developed acro
 | **Phase 1.1** | Foundation Verification & Architecture Corrections | **Completed** |
 | **Phase 2** | Core SDK & Local Experiment Tracking | **Completed** |
 | **Phase 3** | Checkpoint Engine & Recovery | **Completed** |
-| **Phase 4** | UI Component Library (`@runvault/ui`) | Planned |
+| **Phase 4.1** | Storage Provider Architecture & Local Backend | **Completed** |
+| **Phase 4.2** | Google Drive Checkpoint Storage Integration | **Completed** |
+| **Phase 4.3+** | UI Component Library (`@runvault/ui`) & Dashboard | Planned |
 | **Phase 5** | Standalone Dashboard (`apps/web`) | Planned |
 | **Phase 6** | Platform Control Plane & Hosted API | Planned |
 | **Phase 7** | Studio & Managed JupyterLab Environments | Planned |
@@ -205,10 +207,82 @@ print(f"Restored: {restored_ckpt.name} from {artifact_path}")
 
 RunVault decouples artifact storage from checkpoint orchestration through an explicit `StorageProvider` contract:
 
-- **`StorageProvider` Protocol:** Defines `stage_artifact`, `publish_artifact`, `exists`, `delete_artifact`, `verify_artifact`, `get_artifact_path`, and `read_artifact_bytes`.
+- **`StorageProvider` Protocol:** Defines `stage_artifact`, `publish_artifact`, `exists`, `delete_artifact`, `verify_artifact`, `get_artifact_path`, `open_artifact`, and `read_artifact_bytes`.
 - **`StorageCapabilities`:** Declares backend characteristics (`supports_exclusive_publication`, `supports_directory_sync`, `provides_local_path`, `can_verify_integrity`).
 - **`LocalStorageProvider`:** Default local filesystem backend encapsulating POSIX/Windows durability, staging cleanup diagnostics, path containment, and symlink rejections.
-- **Pluggable & Injected:** Custom providers can be configured on `runvault.init(storage_provider=...)`, `ActiveRun`, or passed directly to `save_checkpoint` / `restore_checkpoint`. Remote providers without local filesystem paths are fully supported via `result.read_bytes()` and `result.read_text()`.
+- **Pluggable & Injected:** Custom providers can be configured on `runvault.init(storage_provider=...)`, `ActiveRun`, or passed directly to `save_checkpoint` / `restore_checkpoint`. Remote providers without local filesystem paths are fully supported via streaming (`recovery.open()`, `result.read_bytes()`, and `result.read_text()`).
+
+### Google Drive Checkpoint Storage (`runvault[gdrive]`)
+
+RunVault supports direct-to-storage checkpointing with Google Drive, allowing models trained in Google Colab or ephemeral environments to persist directly into the user's Drive storage without routing binary payloads through any server.
+
+#### 1. Installation
+
+Install the optional `[gdrive]` extra:
+
+```bash
+pip install "runvault[gdrive]"
+```
+
+The core `runvault` package remains lightweight and stdlib-only; Google API libraries are only imported when the Google Drive integration is explicitly used.
+
+#### 2. Google Colab Workflow
+
+In a Google Colab notebook, RunVault automatically detects the environment and requests access using Colab's native user authentication:
+
+```python
+import runvault
+from runvault.integrations.gdrive import GoogleDriveStorageProvider
+
+# 1. Initialize provider (auto-authenticates via google.colab.auth)
+gdrive_storage = GoogleDriveStorageProvider(root_folder_name="RunVaultCheckpoints")
+
+# 2. Attach provider to the active run
+with runvault.init(experiment="colab-resnet", storage_provider=gdrive_storage) as run:
+    # 3. Save checkpoints directly to Google Drive
+    run.save_checkpoint(
+        name="epoch-10",
+        writer=lambda dest: torch.save(model.state_dict(), dest),
+        step=10,
+        metadata={"val_acc": 0.942},
+    )
+
+    # 4. Restore checkpoint directly from Drive with streaming verification
+    recovery = run.restore_checkpoint()
+    with recovery.open() as stream:
+        state_dict = torch.load(stream)
+```
+
+#### 3. Local OAuth / Application Default Credentials
+
+Outside of Google Colab, RunVault supports desktop OAuth with secure local token caching or explicit credentials:
+
+```python
+from runvault.integrations.gdrive import GoogleDriveStorageProvider
+
+# Authenticate via local OAuth browser consent flow with cached token
+provider = GoogleDriveStorageProvider.from_oauth(
+    client_secrets_file="client_secret.json",
+    token_cache_path="~/.config/runvault/gdrive_token.json",
+)
+```
+
+- **Credential Isolation & Permissions:** The token cache file is created with owner-only `0o600` permissions inside an owner-only `0o700` directory using atomic temporary-file replacement. Custom `token_cache_path` paths are expanded via `Path.expanduser()` to cleanly isolate different user accounts.
+- **Sanitized Logging:** Failed refresh attempts or credential errors log only exception class names (`type(err).__name__`), never leaking tokens or authorization headers to stdout or log collectors.
+
+#### 4. Durability, Streaming & Security Invariants
+
+- **Direct-to-Storage Plane:** Artifact binaries stream directly between client runtime and Google Drive using resumable chunked HTTP uploads (`MediaFileUpload`) and chunked downloads (`MediaIoBaseDownload`). Checkpoint binaries never proxy through an API server.
+- **Upload Idempotency & Lost Response Recovery:** If a resumable upload completes on Google Drive but the HTTP response is dropped due to a client timeout or network disconnect, RunVault queries existing file metadata by `appProperties.runvault_checkpoint_id` and sha256 checksum before retrying, safely recovering the uploaded artifact without duplicating files.
+- **Preflight & Post-Upload Collision Detection:** Immutability is strictly enforced. Preflight queries verify that neither the filename nor the checkpoint ID exists in the target run folder. In the event of a simultaneous race condition between workers, a post-upload verification query detects duplicates, cleans up the conflicting artifact via compensation deletion, and raises `CheckpointCreationError`.
+- **Bounded-Memory Streaming:** Checkpoints are read via `GoogleDriveDownloadStream`, which enforces $O(\text{chunk\_size})$ memory usage by swapping chunk buffers during pagination rather than accumulating chunks. The stream satisfies the full standard Python binary I/O contract (`read`, `readinto`, `readline`, `readlines`, `seekable`, `readable`).
+- **Transient Error Backoff:** Transient network failures and rate limits (HTTP 429, 500, 502, 503, 504, timeouts) are retried with exponential backoff and randomized jitter.
+- **Accurate Error Classification:** Authentication failures (HTTP 401/403) raise `StorageUnavailableError` (halting corrupted fallbacks), whereas HTTP 404 and trashed files report non-existence for safe older-checkpoint fallback recovery. Programming errors (`TypeError`, `ValueError`) propagate immediately.
+- **Self-Healing Folder Cache:** Root and run folder IDs are cached in-memory for performance, but automatically invalidated and re-queried if folders are modified, deleted, or moved externally.
+- **Failure Compensation:** If a database metadata commit fails after an artifact has been uploaded to Google Drive, RunVault executes compensation cleanup to remove the orphan remote file.
+- **Least-Privilege Scopes:** Uses `https://www.googleapis.com/auth/drive.file`, granting access exclusively to files and folders created by RunVault.
+- **Zero Credential Persistence:** Secrets, tokens, and OAuth credentials are never stored in SQLite database tables or metadata files.
+- **Shared Drive Notice:** Shared Drives (formerly Google Team Drives) require explicit multi-tenant permission flags (`supportsAllDrives=True`) and domain-level policy handling; they are unsupported in Phase 4.2.1 and standard user My Drive folders must be used.
 
 ### Local Workspace Location
 
@@ -230,11 +304,11 @@ The workspace directory can be customized via:
 
 ### Current Scope & Limitations
 
-RunVault Phase 3 establishes the core Python SDK, local metadata engine, and local checkpoint engine. The following capabilities are **not yet implemented** and belong to subsequent phases:
-- UI Component Library (`@runvault/ui`) (Phase 4).
+RunVault Phase 4.2 establishes the core Python SDK, local metadata engine, pluggable storage provider architecture, and direct-to-storage Google Drive integration. The following capabilities are **not yet implemented** and belong to subsequent phases:
+- UI Component Library (`@runvault/ui`) (Phase 4.3+).
 - Standalone Dashboard (`apps/web`) (Phase 5).
-- Model artifact cloud storage providers (Google Drive, S3, GCS).
-- PyTorch high-level training loop callbacks and hooks.
+- Additional cloud storage backends (AWS S3, Google Cloud Storage).
+- PyTorch high-level training loop callbacks and hooks (`runvault[torch]`).
 - Hosted metadata platform, FastAPI server, and PostgreSQL (Phase 6).
 - Studio and managed JupyterLab environments (Phase 7).
 
