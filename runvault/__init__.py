@@ -4,6 +4,12 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from runvault.integrations.gdrive import GoogleDriveStorageProvider
+    from runvault.integrations.torch import (
+        TorchCheckpointManager,
+        TorchRecoveryResult,
+        restore_torch_checkpoint,
+        save_torch_checkpoint,
+    )
 
 from runvault.api import (
     CheckpointRecoveryResult,
@@ -97,6 +103,8 @@ __all__ = [
     "StorageUnavailableError",
     "Tag",
     "TerminalRunError",
+    "TorchCheckpointManager",
+    "TorchRecoveryResult",
     "UnsupportedCheckpointFormatError",
     "Workspace",
     "WorkspaceError",
@@ -117,7 +125,9 @@ __all__ = [
     "list_runs",
     "reset_repository_cache",
     "restore_checkpoint",
+    "restore_torch_checkpoint",
     "save_checkpoint",
+    "save_torch_checkpoint",
 ]
 
 
@@ -126,4 +136,13 @@ def __getattr__(name: str) -> Any:
         from runvault.integrations.gdrive import GoogleDriveStorageProvider
 
         return GoogleDriveStorageProvider
+    if name in (
+        "TorchCheckpointManager",
+        "TorchRecoveryResult",
+        "restore_torch_checkpoint",
+        "save_torch_checkpoint",
+    ):
+        import runvault.integrations.torch as torch_int
+
+        return getattr(torch_int, name)
     raise AttributeError(f"module 'runvault' has no attribute '{name}'")

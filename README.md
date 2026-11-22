@@ -64,7 +64,8 @@ RunVault is designed around four architectural tiers that will be developed acro
 | **Phase 3** | Checkpoint Engine & Recovery | **Completed** |
 | **Phase 4.1** | Storage Provider Architecture & Local Backend | **Completed** |
 | **Phase 4.2** | Google Drive Checkpoint Storage Integration | **Completed** |
-| **Phase 4.3+** | UI Component Library (`@runvault/ui`) & Dashboard | Planned |
+| **Phase 4.3** | PyTorch Integration & Training Recovery | **Completed** |
+| **Phase 4.4+** | UI Component Library (`@runvault/ui`) & Dashboard | Planned |
 | **Phase 5** | Standalone Dashboard (`apps/web`) | Planned |
 | **Phase 6** | Platform Control Plane & Hosted API | Planned |
 | **Phase 7** | Studio & Managed JupyterLab Environments | Planned |
@@ -284,6 +285,143 @@ provider = GoogleDriveStorageProvider.from_oauth(
 - **Zero Credential Persistence:** Secrets, tokens, and OAuth credentials are never stored in SQLite database tables or metadata files.
 - **Shared Drive Notice:** Shared Drives (formerly Google Team Drives) require explicit multi-tenant permission flags (`supportsAllDrives=True`) and domain-level policy handling; they are unsupported in Phase 4.2.1 and standard user My Drive folders must be used.
 
+### PyTorch Integration & Training Recovery (`runvault[torch]`)
+
+RunVault provides first-class PyTorch training support designed for standard PyTorch loops without requiring heavyweight wrapper frameworks (such as Lightning or Accelerate).
+
+#### 1. Installation
+
+Install the optional `[torch]` extra:
+
+```bash
+pip install "runvault[torch]"
+```
+
+The core `runvault` package remains stdlib-only; PyTorch is never imported unless the PyTorch integration is explicitly invoked.
+
+#### 2. Training Loop Integration
+
+Use `TorchCheckpointManager` or `save_torch_checkpoint` to persist model weights, optimizer buffers, learning rate schedulers, AMP GradScalers, and RNG seeds:
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import runvault
+from runvault.integrations.torch import TorchCheckpointManager, save_torch_checkpoint
+
+model = nn.Linear(128, 10)
+optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+
+with runvault.init("resnet-cifar", name="train-baseline") as run:
+    run.log_params({"lr": 1e-3, "batch_size": 64})
+    manager = TorchCheckpointManager(
+        run=run,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        step_interval=500,  # Save checkpoint every 500 steps
+        epoch_interval=1,  # Save checkpoint at each epoch boundary
+    )
+
+    for epoch in range(1, 11):
+        for step, (inputs, targets) in enumerate(dataloader):
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+
+            # Record step metrics & trigger step interval checkpoints
+            manager.step_end(global_step, metrics={"train_loss": loss.item()})
+            global_step += 1
+
+        scheduler.step()
+        # Record epoch metrics & persist epoch boundary checkpoint
+        manager.epoch_end(
+            epoch, step=global_step, metrics={"val_loss": val_loss}, best_metric=val_loss
+        )
+```
+
+#### 3. Interrupted Training Resume & Recovery
+
+Resume training seamlessly after unexpected termination, runtime preemption, or hardware failure:
+
+```python
+from runvault.integrations.torch import restore_torch_checkpoint
+
+model = nn.Linear(128, 10)
+optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+
+# Restore latest valid checkpoint into live model, optimizer, and RNG states
+with runvault.init("resnet-cifar", name="resumed-run") as run:
+    recovery = restore_torch_checkpoint(
+        run_or_id="previous-run-id",
+        model=model,
+        optimizer=optimizer,
+    )
+    print(f"Resumed from checkpoint: {recovery.checkpoint.name}")
+    print(f"Starting at Epoch: {recovery.epoch + 1}, Step: {recovery.step}")
+    if recovery.is_fallback:
+        print("Notice: Fell back to earlier valid checkpoint due to corruption in latest.")
+
+    start_epoch = (recovery.epoch or 0) + 1
+    global_step = recovery.step or 0
+
+    # Resume training loop from restored epoch and step...
+```
+
+#### 4. Google Colab + Google Drive Workflow
+
+In Google Colab, ephemeral runtimes can disconnect without warning. By combining `GoogleDriveStorageProvider` with `runvault[torch]`, training checkpoints stream directly into Google Drive storage and can be resumed across runtime instances:
+
+```python
+import runvault
+from runvault.integrations.gdrive import GoogleDriveStorageProvider
+from runvault.integrations.torch import TorchCheckpointManager, restore_torch_checkpoint
+
+# 1. Direct-to-Drive remote storage (auto-authenticates in Colab)
+gdrive = GoogleDriveStorageProvider(root_folder_name="ColabTrainingVault")
+
+# 2. Check if a previous checkpoint exists to resume from
+with runvault.init("colab-transformer", storage_provider=gdrive) as run:
+    latest = run.get_latest_valid_checkpoint()
+    if latest:
+        rec = restore_torch_checkpoint(run, model, optimizer=optimizer, scheduler=scheduler)
+        start_epoch = (rec.epoch or 0) + 1
+    else:
+        start_epoch = 1
+
+    # 3. Training with automatic epoch checkpoints streamed directly to Drive
+    manager = TorchCheckpointManager(run=run, model=model, optimizer=optimizer, scheduler=scheduler)
+    for epoch in range(start_epoch, 50):
+        # ... training step loop ...
+        manager.epoch_end(epoch, metrics={"val_acc": val_acc})
+```
+
+#### 5. Serialization Security & Safe Loading
+
+RunVault enforces **safe loading (`weights_only=True`) by default**:
+
+- **Safe Deserialization (`safe_load=True`):** Checkpoints deserialize with PyTorch's `weights_only=True`. RunVault serializes RNG states (including NumPy) as clean Python primitives and tensors, allowing full state reconstruction without unpickling arbitrary Python classes.
+- **Trusted Checkpoint Requirement (`safe_load=False`):** If custom objects require general unpickling, callers must explicitly pass `safe_load=False`. A prominent warning is logged.
+- **Integrity vs Authenticity:** RunVault's SHA-256 verification guarantees that an artifact has not suffered bit rot, truncation, or network corruption. It does **not** verify author authenticity. Never load unverified third-party checkpoints with `safe_load=False`.
+
+#### 6. RNG & Reproducibility Boundary
+
+RunVault captures and restores:
+- Python standard library `random` state
+- NumPy `numpy.random` state (when installed)
+- PyTorch CPU RNG state (`torch.get_rng_state()`)
+- PyTorch CUDA RNG states for all available devices (`torch.cuda.get_rng_state_all()`)
+
+**Limitations & Boundary:**
+Exact mathematical reproducibility cannot be guaranteed purely through RNG state dicts. The reproducibility boundary is limited by:
+- Multi-processing DataLoader workers: Worker processes initialized prior to RNG restoration maintain independent random states unless explicitly re-seeded in `worker_init_fn`.
+- Asynchronous data prefetching and multi-threading.
+- Non-deterministic CUDA kernels (e.g., atomic additions in backward passes). Strict algorithmic determinism requires setting `torch.use_deterministic_algorithms(True)` and `torch.backends.cudnn.deterministic = True`.
+
 ### Local Workspace Location
 
 By default, RunVault stores metadata locally in an embedded SQLite database and checkpoint artifacts in:
@@ -304,11 +442,10 @@ The workspace directory can be customized via:
 
 ### Current Scope & Limitations
 
-RunVault Phase 4.2 establishes the core Python SDK, local metadata engine, pluggable storage provider architecture, and direct-to-storage Google Drive integration. The following capabilities are **not yet implemented** and belong to subsequent phases:
-- UI Component Library (`@runvault/ui`) (Phase 4.3+).
+RunVault Phase 4.3 establishes the core Python SDK, local metadata engine, pluggable storage provider architecture, direct-to-storage Google Drive integration, and PyTorch training integration. The following capabilities are **not yet implemented** and belong to subsequent phases:
+- UI Component Library (`@runvault/ui`) (Phase 4.4+).
 - Standalone Dashboard (`apps/web`) (Phase 5).
 - Additional cloud storage backends (AWS S3, Google Cloud Storage).
-- PyTorch high-level training loop callbacks and hooks (`runvault[torch]`).
 - Hosted metadata platform, FastAPI server, and PostgreSQL (Phase 6).
 - Studio and managed JupyterLab environments (Phase 7).
 
