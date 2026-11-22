@@ -78,12 +78,17 @@ RunVault provides a lightweight, offline-first experiment tracking workflow requ
 
 ### Installation
 
+Install `runvault-ai` from PyPI:
+
 ```bash
-# Clone the repository
+pip install runvault-ai
+```
+
+For development or editable installation from source:
+
+```bash
 git clone https://github.com/Black-fox17/run-vault.git
 cd run-vault
-
-# Install runvault in editable mode
 pip install -e .
 ```
 
@@ -222,7 +227,7 @@ RunVault supports direct-to-storage checkpointing with Google Drive, allowing mo
 Install the optional `[gdrive]` extra:
 
 ```bash
-pip install "runvault[gdrive]"
+pip install "runvault-ai[gdrive]"
 ```
 
 The core `runvault` package remains lightweight and stdlib-only; Google API libraries are only imported when the Google Drive integration is explicitly used.
@@ -294,7 +299,7 @@ RunVault provides first-class PyTorch training support designed for standard PyT
 Install the optional `[torch]` extra:
 
 ```bash
-pip install "runvault[torch]"
+pip install "runvault-ai[torch]"
 ```
 
 The core `runvault` package remains stdlib-only; PyTorch is never imported unless the PyTorch integration is explicitly invoked.
@@ -349,20 +354,25 @@ with runvault.init("resnet-cifar", name="train-baseline") as run:
 Resume training seamlessly after unexpected termination, runtime preemption, or hardware failure:
 
 ```python
+import torch.nn as nn
+import torch.optim as optim
+import runvault
 from runvault.integrations.torch import restore_torch_checkpoint
 
 model = nn.Linear(128, 10)
 optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
 
-# Restore latest valid checkpoint into live model, optimizer, and RNG states
+# Restore latest valid checkpoint into live model, optimizer, scheduler, and RNG states
 with runvault.init("resnet-cifar", name="resumed-run") as run:
     recovery = restore_torch_checkpoint(
         run_or_id="previous-run-id",
         model=model,
         optimizer=optimizer,
+        scheduler=scheduler,
     )
     print(f"Resumed from checkpoint: {recovery.checkpoint.name}")
-    print(f"Starting at Epoch: {recovery.epoch + 1}, Step: {recovery.step}")
+    print(f"Starting at Epoch: {(recovery.epoch or 0) + 1}, Step: {recovery.step or 0}")
     if recovery.is_fallback:
         print("Notice: Fell back to earlier valid checkpoint due to corruption in latest.")
 
@@ -377,9 +387,15 @@ with runvault.init("resnet-cifar", name="resumed-run") as run:
 In Google Colab, ephemeral runtimes can disconnect without warning. By combining `GoogleDriveStorageProvider` with `runvault[torch]`, training checkpoints stream directly into Google Drive storage and can be resumed across runtime instances:
 
 ```python
+import torch.nn as nn
+import torch.optim as optim
 import runvault
 from runvault.integrations.gdrive import GoogleDriveStorageProvider
 from runvault.integrations.torch import TorchCheckpointManager, restore_torch_checkpoint
+
+model = nn.Linear(128, 10)
+optimizer = optim.AdamW(model.parameters(), lr=1e-3)
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
 
 # 1. Direct-to-Drive remote storage (auto-authenticates in Colab)
 gdrive = GoogleDriveStorageProvider(root_folder_name="ColabTrainingVault")

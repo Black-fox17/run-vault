@@ -307,7 +307,7 @@ def test_gdrive_check_dependencies() -> None:
 
     with (
         patch.dict("sys.modules", {"google.auth": None}),
-        pytest.raises(ImportError, match="pip install 'runvault\\[gdrive\\]'"),
+        pytest.raises(ImportError, match="pip install 'runvault-ai\\[gdrive\\]'"),
     ):
         check_gdrive_dependencies()
 

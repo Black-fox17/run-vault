@@ -18,7 +18,7 @@ GDRIVE_DEFAULT_SCOPES: Final[tuple[str, ...]] = ("https://www.googleapis.com/aut
 
 GDRIVE_DEPENDENCY_ERROR: Final[str] = (
     "Google Drive storage requires optional dependencies. "
-    "Install them with: pip install 'runvault[gdrive]'"
+    "Install them with: pip install 'runvault-ai[gdrive]'"
 )
 
 

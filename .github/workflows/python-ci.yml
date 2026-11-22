@@ -35,7 +35,7 @@ jobs:
       - name: Create virtual environment and install package
         run: |
           uv venv --python ${{ matrix.python-version }}
-          uv pip install -e ".[dev]"
+          uv pip install -e ".[dev,torch,gdrive]"
 
       - name: Lint with Ruff
         run: uv run ruff check .

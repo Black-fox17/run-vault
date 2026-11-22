@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 TORCH_DEPENDENCY_ERROR: Final[str] = (
     "PyTorch integration requires optional dependencies. "
-    "Install them with: pip install 'runvault[torch]'"
+    "Install them with: pip install 'runvault-ai[torch]'"
 )
 
 
