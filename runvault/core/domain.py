@@ -223,16 +223,24 @@ class Checkpoint:
     id: str
     run_id: str
     name: str
-    artifact_path: str
     size_bytes: int
     checksum_sha256: str
+    artifact_path: str = ""
     step: int | None = None
     format_version: int = CURRENT_CHECKPOINT_FORMAT_VERSION
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
     commit_seq: int | None = None
+    storage_provider: str = "local"
+    storage_key: str = ""
 
     def __post_init__(self) -> None:
+        key = self.storage_key or self.artifact_path
+        if not key or not key.strip():
+            raise ValueError("Checkpoint storage_key or artifact_path must be a non-empty string")
+        object.__setattr__(self, "storage_key", key)
+        object.__setattr__(self, "artifact_path", key)
+
         _validate_identifier(self.id, "id")
         _validate_identifier(self.run_id, "run_id")
         if not self.name or not self.name.strip():
@@ -241,11 +249,14 @@ class Checkpoint:
             raise ValueError(
                 f"Checkpoint name '{self.name}' must be a label, not a filesystem path"
             )
-        if not self.artifact_path or not self.artifact_path.strip():
-            raise ValueError("Checkpoint artifact_path must be a non-empty string")
-        if ".." in self.artifact_path:
+        if ".." in key:
+            raise ValueError(f"Checkpoint artifact_path '{key}' cannot contain traversal")
+        if not self.storage_provider or not self.storage_provider.strip():
+            raise ValueError("Checkpoint storage_provider must be a non-empty string")
+        if "/" in self.storage_provider or "\\" in self.storage_provider:
             raise ValueError(
-                f"Checkpoint artifact_path '{self.artifact_path}' cannot contain traversal"
+                f"Checkpoint storage_provider '{self.storage_provider}' "
+                "cannot contain path separators"
             )
         if self.size_bytes < 0:
             raise ValueError(f"Checkpoint size_bytes must be >= 0, got {self.size_bytes}")

@@ -27,6 +27,7 @@ from runvault.core.errors import (
     InvalidLifecycleTransitionError,
     TerminalRunError,
 )
+from runvault.core.storage.base import StorageProvider
 from runvault.core.workspace import Workspace
 
 MAX_ERROR_MSG_LENGTH = 1024
@@ -47,15 +48,18 @@ class ActiveRun:
         self,
         repository: SQLiteMetadataRepository,
         experiment_id: str,
+        *,
         name: str | None = None,
         run_id: str | None = None,
         initial_tags: dict[str, str] | None = None,
+        storage_provider: StorageProvider | None = None,
     ) -> None:
         self._repo = repository
         self._experiment_id = experiment_id
         self._run_id = run_id or str(uuid.uuid4())
         self._name = name
         self._initial_tags = initial_tags or {}
+        self._storage_provider = storage_provider
         self._status = RunStatus.INITIALIZING
         self._start_time: datetime | None = None
         self._closed = False
@@ -332,6 +336,11 @@ class ActiveRun:
         """The resolved Workspace environment for this run."""
         return Workspace(path=self._repo.db_path.parent)
 
+    @property
+    def storage_provider(self) -> StorageProvider | None:
+        """The default storage provider configured for this run, if any."""
+        return self._storage_provider
+
     # -------------------------------------------------------------------------
     # Checkpoint Operations
     # -------------------------------------------------------------------------
@@ -344,6 +353,7 @@ class ActiveRun:
         step: int | None = None,
         metadata: dict[str, Any] | None = None,
         checkpoint_id: str | None = None,
+        storage: StorageProvider | None = None,
     ) -> Checkpoint:
         """Atomically persist a recoverable training checkpoint.
 
@@ -353,6 +363,7 @@ class ActiveRun:
             step: Optional training step/epoch counter.
             metadata: Optional JSON-compatible dictionary of custom metadata.
             checkpoint_id: Optional UUID override.
+            storage: Optional StorageProvider override.
 
         Returns:
             The committed and verified Checkpoint domain record.
@@ -371,19 +382,24 @@ class ActiveRun:
             step=step,
             metadata=metadata,
             checkpoint_id=checkpoint_id,
+            storage=storage or self._storage_provider,
         )
 
     def get_latest_checkpoint(self) -> Checkpoint | None:
         """Retrieve the newest committed checkpoint metadata for this run."""
         return self._repo.get_latest_checkpoint(self._run_id)
 
-    def get_latest_valid_checkpoint(self) -> CheckpointRecoveryResult | None:
+    def get_latest_valid_checkpoint(
+        self,
+        storage: StorageProvider | None = None,
+    ) -> CheckpointRecoveryResult | None:
         """Find the newest verified checkpoint for this run, falling back if needed."""
         try:
             return get_latest_valid_checkpoint(
                 run_id=self._run_id,
                 workspace=self.workspace,
                 repository=self._repo,
+                storage=storage or self._storage_provider,
             )
         except CheckpointNotFoundError:
             return None
@@ -392,7 +408,11 @@ class ActiveRun:
         """List all committed checkpoints for this run in deterministic order."""
         return self._repo.list_checkpoints(self._run_id)
 
-    def restore_checkpoint(self, checkpoint_id: str | None = None) -> CheckpointRecoveryResult:
+    def restore_checkpoint(
+        self,
+        checkpoint_id: str | None = None,
+        storage: StorageProvider | None = None,
+    ) -> CheckpointRecoveryResult:
         """Verify and restore a checkpoint artifact for recovery.
 
         If checkpoint_id is None, discovers and verifies the latest valid checkpoint,
@@ -401,6 +421,7 @@ class ActiveRun:
 
         Args:
             checkpoint_id: Specific checkpoint ID to restore, or None for latest valid.
+            storage: Optional StorageProvider override.
 
         Returns:
             CheckpointRecoveryResult containing (checkpoint, path, is_fallback, rejected).
@@ -418,6 +439,7 @@ class ActiveRun:
             workspace=self.workspace,
             repository=self._repo,
             checkpoint_id=checkpoint_id,
+            storage=storage or self._storage_provider,
         )
         self._last_restored_checkpoint = result.checkpoint
         self._last_restored_is_fallback = result.is_fallback
@@ -477,6 +499,7 @@ class ExperimentHandle:
         self,
         name: str | None = None,
         tags: dict[str, str] | None = None,
+        storage_provider: StorageProvider | None = None,
     ) -> ActiveRun:
         """Start a new execution run belonging to this experiment."""
         return ActiveRun(
@@ -484,6 +507,7 @@ class ExperimentHandle:
             experiment_id=self._experiment.id,
             name=name,
             initial_tags=tags,
+            storage_provider=storage_provider,
         )
 
     def get_run(self, run_id: str) -> Run | None:

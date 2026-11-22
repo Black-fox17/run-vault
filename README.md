@@ -201,6 +201,15 @@ print(f"Restored: {restored_ckpt.name} from {artifact_path}")
 - **Fail-Safe Cleanup & Error Integrity:** Failure during any step (writer callback, synchronization, hash calculation, or SQLite commit) guarantees clean rollback without masking primary exceptions. Secondary cleanup failures are attached via standard Python exception notes.
 - **Exception Surface:** Canonical exception classes include `CheckpointCreationError`, `CheckpointNotFoundError`, `CheckpointCorruptError` (with `CorruptCheckpointError` available as a backward-compatible alias), and `CheckpointRecoveryError`.
 
+### Storage Provider Architecture
+
+RunVault decouples artifact storage from checkpoint orchestration through an explicit `StorageProvider` contract:
+
+- **`StorageProvider` Protocol:** Defines `stage_artifact`, `publish_artifact`, `exists`, `delete_artifact`, `verify_artifact`, `get_artifact_path`, and `read_artifact_bytes`.
+- **`StorageCapabilities`:** Declares backend characteristics (`supports_exclusive_publication`, `supports_directory_sync`, `provides_local_path`, `can_verify_integrity`).
+- **`LocalStorageProvider`:** Default local filesystem backend encapsulating POSIX/Windows durability, staging cleanup diagnostics, path containment, and symlink rejections.
+- **Pluggable & Injected:** Custom providers can be configured on `runvault.init(storage_provider=...)`, `ActiveRun`, or passed directly to `save_checkpoint` / `restore_checkpoint`. Remote providers without local filesystem paths are fully supported via `result.read_bytes()` and `result.read_text()`.
+
 ### Local Workspace Location
 
 By default, RunVault stores metadata locally in an embedded SQLite database and checkpoint artifacts in:

@@ -81,11 +81,21 @@ def _row_to_checkpoint(row: sqlite3.Row) -> Checkpoint:
         if "commit_seq" in row_keys and row["commit_seq"] is not None
         else None
     )
+    storage_provider = (
+        str(row["storage_provider"])
+        if "storage_provider" in row_keys and row["storage_provider"] is not None
+        else "local"
+    )
+    storage_key = (
+        str(row["storage_key"])
+        if "storage_key" in row_keys and row["storage_key"] is not None
+        else str(row["artifact_path"])
+    )
     return Checkpoint(
         id=str(row["id"]),
         run_id=str(row["run_id"]),
         name=str(row["name"]),
-        artifact_path=str(row["artifact_path"]),
+        artifact_path=storage_key,
         size_bytes=int(row["size_bytes"]),
         checksum_sha256=str(row["checksum_sha256"]),
         step=int(row["step"]) if row["step"] is not None else None,
@@ -93,6 +103,8 @@ def _row_to_checkpoint(row: sqlite3.Row) -> Checkpoint:
         metadata=Checkpoint.deserialize_metadata(metadata_json),
         created_at=_iso_to_datetime(str(row["created_at"])) or utc_now(),
         commit_seq=commit_seq,
+        storage_provider=storage_provider,
+        storage_key=storage_key,
     )
 
 
@@ -537,6 +549,17 @@ class SQLiteMetadataRepository:
 
     def create_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
         """Persist a new checkpoint record in SQLite with full durability."""
+        if not checkpoint.storage_key or not checkpoint.storage_key.strip():
+            raise ValueError(
+                f"Checkpoint '{checkpoint.id}' has null or empty storage_key; "
+                "storage_key invariant violated"
+            )
+        if not checkpoint.storage_provider or not checkpoint.storage_provider.strip():
+            raise ValueError(
+                f"Checkpoint '{checkpoint.id}' has null or empty storage_provider; "
+                "storage_provider invariant violated"
+            )
+
         run = self.get_run(checkpoint.run_id)
         if run is None:
             raise RunNotFoundError(checkpoint.run_id)
@@ -550,25 +573,45 @@ class SQLiteMetadataRepository:
             try:
                 self.connection.execute("BEGIN IMMEDIATE;")
                 try:
+                    cursor.execute("PRAGMA table_info(checkpoints);")
+                    table_cols = {str(col[1]) for col in cursor.fetchall()}
+
+                    cols = [
+                        "id",
+                        "run_id",
+                        "name",
+                        "artifact_path",
+                        "size_bytes",
+                        "checksum_sha256",
+                        "step",
+                        "format_version",
+                        "metadata_json",
+                        "created_at",
+                    ]
+                    vals: list[Any] = [
+                        checkpoint.id,
+                        checkpoint.run_id,
+                        checkpoint.name,
+                        checkpoint.storage_key,
+                        checkpoint.size_bytes,
+                        checkpoint.checksum_sha256,
+                        checkpoint.step,
+                        checkpoint.format_version,
+                        checkpoint.serialize_metadata(),
+                        checkpoint.created_at.isoformat(),
+                    ]
+                    if "storage_provider" in table_cols:
+                        cols.append("storage_provider")
+                        vals.append(checkpoint.storage_provider)
+                    if "storage_key" in table_cols:
+                        cols.append("storage_key")
+                        vals.append(checkpoint.storage_key)
+
+                    placeholders = ", ".join(["?"] * len(cols))
+                    col_str = ", ".join(cols)
                     cursor.execute(
-                        """
-                        INSERT INTO checkpoints (
-                            id, run_id, name, artifact_path, size_bytes, checksum_sha256,
-                            step, format_version, metadata_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                        """,
-                        (
-                            checkpoint.id,
-                            checkpoint.run_id,
-                            checkpoint.name,
-                            checkpoint.artifact_path,
-                            checkpoint.size_bytes,
-                            checkpoint.checksum_sha256,
-                            checkpoint.step,
-                            checkpoint.format_version,
-                            checkpoint.serialize_metadata(),
-                            checkpoint.created_at.isoformat(),
-                        ),
+                        f"INSERT INTO checkpoints ({col_str}) VALUES ({placeholders});",
+                        tuple(vals),
                     )
                     assigned_seq = cursor.lastrowid
                     self.connection.execute("COMMIT;")
@@ -590,8 +633,7 @@ class SQLiteMetadataRepository:
         try:
             cursor.execute(
                 """
-                SELECT id, run_id, name, artifact_path, size_bytes, checksum_sha256,
-                       step, format_version, metadata_json, created_at, commit_seq
+                SELECT *
                 FROM checkpoints
                 WHERE id = ?;
                 """,
@@ -610,8 +652,7 @@ class SQLiteMetadataRepository:
         try:
             cursor.execute(
                 """
-                SELECT id, run_id, name, artifact_path, size_bytes, checksum_sha256,
-                       step, format_version, metadata_json, created_at, commit_seq
+                SELECT *
                 FROM checkpoints
                 WHERE run_id = ?
                 ORDER BY commit_seq ASC;
@@ -628,8 +669,7 @@ class SQLiteMetadataRepository:
         try:
             cursor.execute(
                 """
-                SELECT id, run_id, name, artifact_path, size_bytes, checksum_sha256,
-                       step, format_version, metadata_json, created_at, commit_seq
+                SELECT *
                 FROM checkpoints
                 WHERE run_id = ?
                 ORDER BY commit_seq DESC

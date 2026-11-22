@@ -7,7 +7,7 @@ from typing import Final
 
 from runvault.core.errors import WorkspaceError
 
-CURRENT_SCHEMA_VERSION: Final[int] = 4
+CURRENT_SCHEMA_VERSION: Final[int] = 5
 
 SCHEMA_V1_STATEMENTS: Final[tuple[str, ...]] = (
     """
@@ -181,6 +181,25 @@ SCHEMA_V4_STATEMENTS: Final[tuple[str, ...]] = (
 )
 
 
+SCHEMA_V5_STATEMENTS: Final[tuple[str, ...]] = (
+    """
+    ALTER TABLE checkpoints ADD COLUMN storage_provider TEXT NOT NULL DEFAULT 'local';
+    """,
+    """
+    ALTER TABLE checkpoints ADD COLUMN storage_key TEXT;
+    """,
+    """
+    UPDATE checkpoints SET storage_key = artifact_path WHERE storage_key IS NULL;
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_storage_provider ON checkpoints(storage_provider);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_storage_key ON checkpoints(storage_key);
+    """,
+)
+
+
 def _apply_v1(cursor: sqlite3.Cursor) -> None:
     for stmt in SCHEMA_V1_STATEMENTS:
         cursor.execute(stmt)
@@ -201,11 +220,17 @@ def _apply_v4(cursor: sqlite3.Cursor) -> None:
         cursor.execute(stmt)
 
 
+def _apply_v5(cursor: sqlite3.Cursor) -> None:
+    for stmt in SCHEMA_V5_STATEMENTS:
+        cursor.execute(stmt)
+
+
 MIGRATIONS: Final[dict[int, Callable[[sqlite3.Cursor], None]]] = {
     1: _apply_v1,
     2: _apply_v2,
     3: _apply_v3,
     4: _apply_v4,
+    5: _apply_v5,
 }
 
 

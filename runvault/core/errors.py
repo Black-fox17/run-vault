@@ -180,3 +180,18 @@ class CheckpointRecoveryError(CheckpointError):
         super().__init__(f"Checkpoint recovery failed for run '{run_id}': {reason}")
         self.run_id = run_id
         self.reason = reason
+
+
+class StorageUnavailableError(CheckpointError):
+    """Raised when storage is unreachable, offline, or inaccessible due to I/O or permissions."""
+
+    def __init__(
+        self,
+        identifier: str,
+        reason: str,
+        original_error: Exception | None = None,
+    ) -> None:
+        super().__init__(f"Storage unavailable for artifact '{identifier}': {reason}")
+        self.identifier = identifier
+        self.reason = reason
+        self.original_error = original_error

@@ -25,9 +25,17 @@ from runvault.core.errors import (
     CheckpointNotFoundError,
     CheckpointRecoveryError,
     CorruptCheckpointError,
+    StorageUnavailableError,
     UnsupportedCheckpointFormatError,
 )
 from runvault.core.session import ActiveRun, ExperimentHandle
+from runvault.core.storage.base import (
+    PublishedArtifact,
+    StagedArtifact,
+    StorageCapabilities,
+    StorageProvider,
+)
+from runvault.core.storage.local import LocalStorageProvider
 from runvault.core.workspace import Workspace, resolve_db_path
 
 __all__ = [
@@ -38,6 +46,12 @@ __all__ = [
     "CheckpointRecoveryError",
     "CheckpointRecoveryResult",
     "CorruptCheckpointError",
+    "LocalStorageProvider",
+    "PublishedArtifact",
+    "StagedArtifact",
+    "StorageCapabilities",
+    "StorageProvider",
+    "StorageUnavailableError",
     "UnsupportedCheckpointFormatError",
     "Workspace",
     "create_experiment",
@@ -95,6 +109,7 @@ def init(
     name: str | None = None,
     tags: dict[str, str] | None = None,
     description: str | None = None,
+    storage_provider: StorageProvider | None = None,
     workspace: str | Path | None = None,
 ) -> ActiveRun:
     """Initialize a RunVault execution run under an experiment.
@@ -122,6 +137,7 @@ def init(
         experiment_id=exp.id,
         name=name,
         initial_tags=tags,
+        storage_provider=storage_provider,
     )
 
 
@@ -251,6 +267,7 @@ def save_checkpoint(
     step: int | None = None,
     metadata: dict[str, Any] | None = None,
     checkpoint_id: str | None = None,
+    storage: StorageProvider | None = None,
     workspace: str | Path | None = None,
 ) -> Checkpoint:
     """Atomically create, write, verify, and publish a checkpoint for a run."""
@@ -265,6 +282,7 @@ def save_checkpoint(
         step=step,
         metadata=metadata,
         checkpoint_id=checkpoint_id,
+        storage=storage,
     )
 
 
@@ -301,13 +319,14 @@ def get_latest_checkpoint(
 def get_latest_valid_checkpoint(
     run_id: str,
     *,
+    storage: StorageProvider | None = None,
     workspace: str | Path | None = None,
 ) -> CheckpointRecoveryResult | None:
     """Find the newest verified checkpoint for a run, falling back if needed."""
     repo = _get_repository(workspace)
     ws = Workspace.from_path(workspace)
     try:
-        return _engine_latest_valid_checkpoint(run_id, ws, repo)
+        return _engine_latest_valid_checkpoint(run_id, ws, repo, storage=storage)
     except CheckpointNotFoundError:
         return None
 
@@ -316,6 +335,7 @@ def restore_checkpoint(
     run_id: str,
     checkpoint_id: str | None = None,
     *,
+    storage: StorageProvider | None = None,
     workspace: str | Path | None = None,
 ) -> CheckpointRecoveryResult:
     """Verify and restore a checkpoint artifact for recovery.
@@ -327,4 +347,4 @@ def restore_checkpoint(
     """
     repo = _get_repository(workspace)
     ws = Workspace.from_path(workspace)
-    return _engine_restore_checkpoint(run_id, ws, repo, checkpoint_id)
+    return _engine_restore_checkpoint(run_id, ws, repo, checkpoint_id, storage=storage)
