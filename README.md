@@ -480,7 +480,7 @@ RunVault Phase 4.3 establishes the core Python SDK, local metadata engine, plugg
 Using `uv` (recommended):
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/run-vault.git
+git clone https://github.com/Black-fox17/run-vault.git
 cd run-vault
 
 # Create virtual environment and install in editable mode with development dependencies
